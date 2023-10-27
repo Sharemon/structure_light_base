@@ -24,7 +24,7 @@ void DepthReconstructor::set_min_B(int B)
 	this->min_B = B;
 }
 
-void phase_reconstruct_from_shift(const std::vector<cv::Mat>& in, cv::Mat& out, int min_B)
+void phase_reconstruct_from_shift(const std::vector<cv::Mat>& in, cv::Mat& out, int min_B, cv::Mat& B_mask)
 {
 	int w = in[0].cols;
 	int h = in[0].rows;
@@ -46,17 +46,22 @@ void phase_reconstruct_from_shift(const std::vector<cv::Mat>& in, cv::Mat& out, 
 				sum_cos += (in[i].at<uchar>(y, x) * cos(i * phase_shift));
 			}
 
-			double B = sqrt(sum_sin * sum_sin + sum_cos * sum_cos);
+			double B = sqrt(sum_sin * sum_sin + sum_cos * sum_cos) * 2 / in.size();
 			if (B > min_B)
+			{
 				out.at<double>(y, x) = -atan2(sum_sin, sum_cos);
+			}
 			else
+			{
 				out.at<double>(y, x) = -CV_PI;
+				B_mask.at<uchar>(y, x) = 0;
+			}
 		}
 	}
 }
 
 
-double phase_diff(const cv::Mat& in1, const cv::Mat& in2, double T1, double T2, cv::Mat& out)
+double phase_diff(const cv::Mat& in1, const cv::Mat& in2, double T1, double T2, cv::Mat& out, cv::Mat& K)
 {
 	int w = in1.cols;
 	int h = in1.rows;
@@ -65,7 +70,8 @@ double phase_diff(const cv::Mat& in1, const cv::Mat& in2, double T1, double T2, 
 
 	out = cv::Mat::zeros(cv::Size(w, h), CV_64FC1);
 
-	double max = 0;
+	double max = -DBL_MAX;
+	double min = DBL_MAX;
 	for (int y = 0; y < h; y++)
 	{
 		for (int x = 0; x < w; x++)
@@ -77,15 +83,15 @@ double phase_diff(const cv::Mat& in1, const cv::Mat& in2, double T1, double T2, 
 			int k = round((t * delta_phi - phi1) / CV_2PI);
 			
 			out.at<double>(y, x) = k * CV_2PI + phi1;
+			K.at<double>(y, x) = 5 * abs(0.5 - abs(abs((t * delta_phi - phi1) / CV_2PI - (int)((t * delta_phi - phi1) / CV_2PI)) - 0.5));
 
-			if (max < out.at<double>(y, x))
-			{
-				max = out.at<double>(y, x);
-			}
+			max = (max < out.at<double>(y, x)) ? out.at<double>(y, x) : max;
+			min = (min > out.at<double>(y, x)) ? out.at<double>(y, x) : min;
 		}
 	}
 
-	out.convertTo(out, CV_64FC1, CV_2PI / max);
+	out -= min;
+	out.convertTo(out, CV_64FC1, CV_2PI / (max - min + 0.2));
 
 	return (T1 * T2 / abs(T1 - T2));
 }
@@ -100,12 +106,15 @@ void merge_multi_wavelength(const std::vector<cv::Mat>& in, const std::vector<in
 	}
 
 	cv::Mat phase_diff_result12;
-	double wavelength12 = phase_diff(in[0], in[1], wavelengths[0], wavelengths[1], phase_diff_result12);
+	cv::Mat K12 = cv::Mat::zeros(in[0].size(), CV_64FC1);
+	double wavelength12 = phase_diff(in[0], in[1], wavelengths[0], wavelengths[1], phase_diff_result12, K12);
 
 	cv::Mat phase_diff_result23;
-	double wavelength23 = phase_diff(in[1], in[2], wavelengths[1], wavelengths[2], phase_diff_result23);
+	cv::Mat K23 = cv::Mat::zeros(in[0].size(), CV_64FC1);
+	double wavelength23 = phase_diff(in[1], in[2], wavelengths[1], wavelengths[2], phase_diff_result23, K23);
 
-	phase_diff(phase_diff_result12, phase_diff_result23, wavelength12, wavelength23, out);
+	cv::Mat K = cv::Mat::zeros(in[0].size(), CV_64FC1);
+	phase_diff(phase_diff_result12, phase_diff_result23, wavelength12, wavelength23, out, K);
 }
 
 
@@ -118,6 +127,7 @@ void DepthReconstructor::reconstruct(const std::vector<cv::Mat>& in, cv::Mat& ou
 	}
 
 	std::vector<cv::Mat> phase_results;
+	cv::Mat B_mask = cv::Mat(in[0].size(), CV_8UC1, 255);
 
 	// phase shift reconstruct
 	for (int i = 0; i < this->strip_generator->wavelengths.size(); i++)
@@ -125,16 +135,19 @@ void DepthReconstructor::reconstruct(const std::vector<cv::Mat>& in, cv::Mat& ou
 		std::vector<cv::Mat> image_for_same_wavelength(in.begin() + i * this->strip_generator->phase_shift_number, in.begin() + (i + 1) * this->strip_generator->phase_shift_number);
 		
 		cv::Mat phase_result;
-		phase_reconstruct_from_shift(image_for_same_wavelength, phase_result, this->min_B);
+		phase_reconstruct_from_shift(image_for_same_wavelength, phase_result, this->min_B, B_mask);
 
-		phase_result += CV_PI;
+		//phase_result += CV_PI;
 
 		phase_results.push_back(phase_result);
 	}
-
+	
 	// multi_wavelength merge
 	merge_multi_wavelength(phase_results, this->strip_generator->wavelengths, out);
 
 	// nomalize
 	out.convertTo(out, CV_64FC1, 1 / CV_2PI);
+
+	// mask
+	out.setTo(0, ~B_mask);
 }
