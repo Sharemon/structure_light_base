@@ -9,6 +9,7 @@
 #define __DEPTH_RECONSTRUCTOR_HPP__
 
 #include "StripeGenerator.hpp"
+#include "StereoParameter.hpp"
 
 namespace StructureLightBase
 {
@@ -17,13 +18,16 @@ namespace StructureLightBase
     private:
         StripeGenerator* strip_generator = NULL;
         int min_B;
+        StereoCommon::StereoParameter* stereo_param;
 
     public:
         DepthReconstructor(StripeGenerator *strip_generator);
         ~DepthReconstructor();
         
         void set_min_B(int B);
-        void reconstruct(const std::vector<cv::Mat>& in, cv::Mat& out);
+        void set_stereo_param(StereoCommon::StereoParameter* parameter);
+        void phase_reconstruct(const std::vector<cv::Mat>& in, cv::Mat& out);
+        void depth_reconstruct(const cv::Mat& left, const cv::Mat& right, cv::Mat& disparity);
     };
 }
 

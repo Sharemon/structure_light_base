@@ -32,8 +32,6 @@ namespace StructureLightBase
         int current_wavelength_idx;
         int current_phase_shift_idx;
 
-        void reset_index();
-
     public:
         StripeGenerator(int width, int height);
         ~StripeGenerator();
@@ -45,6 +43,7 @@ namespace StructureLightBase
         void set_B(int B);
 
         bool next(cv::Mat& pattern);
+        void reset_index();
         int get_pattern_size();
 
         friend class DepthReconstructor;

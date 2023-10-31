@@ -24,7 +24,14 @@ void DepthReconstructor::set_min_B(int B)
 	this->min_B = B;
 }
 
-void phase_reconstruct_from_shift(const std::vector<cv::Mat>& in, cv::Mat& out, int min_B, cv::Mat& B_mask)
+
+void DepthReconstructor::set_stereo_param(StereoCommon::StereoParameter* parameter)
+{
+	this->stereo_param = parameter;
+}
+
+
+void phase_reconstruct_from_shift(const std::vector<cv::Mat>& in, cv::Mat& out, int min_B = -1, cv::Mat& B_mask = cv::Mat())
 {
 	int w = in[0].cols;
 	int h = in[0].rows;
@@ -46,22 +53,29 @@ void phase_reconstruct_from_shift(const std::vector<cv::Mat>& in, cv::Mat& out, 
 				sum_cos += (in[i].at<uchar>(y, x) * cos(i * phase_shift));
 			}
 
-			double B = sqrt(sum_sin * sum_sin + sum_cos * sum_cos) * 2 / in.size();
-			if (B > min_B)
+			if (min_B > 0)
 			{
-				out.at<double>(y, x) = -atan2(sum_sin, sum_cos);
+				double B = sqrt(sum_sin * sum_sin + sum_cos * sum_cos) * 2 / in.size();
+				if (B > min_B)
+				{
+					out.at<double>(y, x) = -atan2(sum_sin, sum_cos);
+				}
+				else
+				{
+					out.at<double>(y, x) = -CV_PI;
+					B_mask.at<uchar>(y, x) = 0;
+				}
 			}
 			else
 			{
-				out.at<double>(y, x) = -CV_PI;
-				B_mask.at<uchar>(y, x) = 0;
+				out.at<double>(y, x) = -atan2(sum_sin, sum_cos);
 			}
 		}
 	}
 }
 
 
-double phase_diff(const cv::Mat& in1, const cv::Mat& in2, double T1, double T2, cv::Mat& out, cv::Mat& K)
+double phase_diff(const cv::Mat& in1, const cv::Mat& in2, double T1, double T2, cv::Mat& out, cv::Mat& K = cv::Mat())
 {
 	int w = in1.cols;
 	int h = in1.rows;
@@ -70,8 +84,6 @@ double phase_diff(const cv::Mat& in1, const cv::Mat& in2, double T1, double T2, 
 
 	out = cv::Mat::zeros(cv::Size(w, h), CV_64FC1);
 
-	double max = -DBL_MAX;
-	double min = DBL_MAX;
 	for (int y = 0; y < h; y++)
 	{
 		for (int x = 0; x < w; x++)
@@ -79,46 +91,64 @@ double phase_diff(const cv::Mat& in1, const cv::Mat& in2, double T1, double T2, 
 			double phi1 = in1.at<double>(y, x);
 			double phi2 = in2.at<double>(y, x);
 
-			double delta_phi = phi1 >= phi2 ? phi1 - phi2 : CV_2PI - (phi2 - phi1);
+			double delta_phi = phi1 > phi2 ? phi1 - phi2 : CV_2PI - (phi2 - phi1);
 			int k = round((t * delta_phi - phi1) / CV_2PI);
-			
-			out.at<double>(y, x) = k * CV_2PI + phi1;
-			K.at<double>(y, x) = 5 * abs(0.5 - abs(abs((t * delta_phi - phi1) / CV_2PI - (int)((t * delta_phi - phi1) / CV_2PI)) - 0.5));
 
-			max = (max < out.at<double>(y, x)) ? out.at<double>(y, x) : max;
-			min = (min > out.at<double>(y, x)) ? out.at<double>(y, x) : min;
+			out.at<double>(y, x) = k * CV_2PI + phi1;
+
+			if (!K.empty())
+				K.at<double>(y, x) = 5 * abs(0.5 - abs(abs((t * delta_phi - phi1) / CV_2PI - (int)((t * delta_phi - phi1) / CV_2PI)) - 0.5));
 		}
 	}
 
-	out -= min;
-	out.convertTo(out, CV_64FC1, CV_2PI / (max - min + 0.2));
-
-	return (T1 * T2 / abs(T1 - T2));
+	return (T1 * T2 / (T1 - T2));
 }
 
 
-void merge_multi_wavelength(const std::vector<cv::Mat>& in, const std::vector<int>& wavelengths, cv::Mat& out)
+void merge_multi_wavelength(const std::vector<cv::Mat>& in, const std::vector<cv::Mat>& ideal, const std::vector<int>& wavelengths, cv::Mat& out)
 {
-	if (in.size() != 3)	// process 3 multi-wavelength only now
+	if (in.size() != 3 && ideal.size() != 3)	// process 3 multi-wavelength only now
 	{
 		out = cv::Mat();
 		return;
 	}
 
-	cv::Mat phase_diff_result12;
+	cv::Mat phase_diff_result12, phase_diff_result23;
+	cv::Mat phase_diff_ideal12, phase_diff_ideal23, phase_diff_ideal123;
 	cv::Mat K12 = cv::Mat::zeros(in[0].size(), CV_64FC1);
-	double wavelength12 = phase_diff(in[0], in[1], wavelengths[0], wavelengths[1], phase_diff_result12, K12);
-
-	cv::Mat phase_diff_result23;
 	cv::Mat K23 = cv::Mat::zeros(in[0].size(), CV_64FC1);
-	double wavelength23 = phase_diff(in[1], in[2], wavelengths[1], wavelengths[2], phase_diff_result23, K23);
-
 	cv::Mat K = cv::Mat::zeros(in[0].size(), CV_64FC1);
+	double wavelength12, wavelength23, min, max;
+
+	// calcualte phase diff and use ideal min and max to normalize
+	// 12
+	wavelength12 = phase_diff(ideal[0], ideal[1], wavelengths[0], wavelengths[1], phase_diff_ideal12);
+	cv::minMaxLoc(phase_diff_ideal12, &min, &max);
+	
+	wavelength12 = phase_diff(in[0], in[1], wavelengths[0], wavelengths[1], phase_diff_result12, K12);
+	phase_diff_ideal12 = (phase_diff_ideal12 - min) / (max - min + 0.2) * CV_2PI;
+	phase_diff_result12 = (phase_diff_result12 - min) / (max - min + 0.2) * CV_2PI;
+
+	// 23
+	wavelength23 = phase_diff(ideal[1], ideal[2], wavelengths[1], wavelengths[2], phase_diff_ideal23);
+	cv::minMaxLoc(phase_diff_ideal23, &min, &max);
+	
+	wavelength23 = phase_diff(in[1], in[2], wavelengths[1], wavelengths[2], phase_diff_result23, K23);
+	phase_diff_ideal23 = (phase_diff_ideal23 - min) / (max - min + 0.2) * CV_2PI;
+	phase_diff_result23 = (phase_diff_result23 - min) / (max - min + 0.2) * CV_2PI;
+
+	// 123
+	phase_diff(phase_diff_ideal12, phase_diff_ideal23, wavelength12, wavelength23, phase_diff_ideal123);
+	cv::minMaxLoc(phase_diff_ideal123, &min, &max);
+
 	phase_diff(phase_diff_result12, phase_diff_result23, wavelength12, wavelength23, out, K);
+	phase_diff_ideal123 = (phase_diff_ideal123 - min) / (max - min + 0.2) * CV_2PI;
+	out = (out - min) / (max - min + 0.2) * CV_2PI;
+	out = out.colRange(0, out.cols - 1) - out.colRange(1, out.cols);
 }
 
 
-void DepthReconstructor::reconstruct(const std::vector<cv::Mat>& in, cv::Mat& out)
+void DepthReconstructor::phase_reconstruct(const std::vector<cv::Mat>& in, cv::Mat& out)
 {
 	if (in.size() != this->strip_generator->phase_shift_number * this->strip_generator->wavelengths.size())
 	{
@@ -126,28 +156,202 @@ void DepthReconstructor::reconstruct(const std::vector<cv::Mat>& in, cv::Mat& ou
 		return;
 	}
 
+	// generate ideal stripe to calculate min max of phase diff image
+	std::vector<cv::Mat> strip_ideals;
+
+	this->strip_generator->reset_index();
+	for (int i = 0; i < this->strip_generator->phase_shift_number * this->strip_generator->wavelengths.size(); i++)
+	{
+		cv::Mat pattern;
+		this->strip_generator->next(pattern);
+		strip_ideals.push_back(pattern);
+	}
+
 	std::vector<cv::Mat> phase_results;
+	std::vector<cv::Mat> phase_ideals;
 	cv::Mat B_mask = cv::Mat(in[0].size(), CV_8UC1, 255);
 
 	// phase shift reconstruct
 	for (int i = 0; i < this->strip_generator->wavelengths.size(); i++)
 	{
 		std::vector<cv::Mat> image_for_same_wavelength(in.begin() + i * this->strip_generator->phase_shift_number, in.begin() + (i + 1) * this->strip_generator->phase_shift_number);
-		
-		cv::Mat phase_result;
+		std::vector<cv::Mat> ideal_for_same_wavelength(strip_ideals.begin() + i * this->strip_generator->phase_shift_number, strip_ideals.begin() + (i + 1) * this->strip_generator->phase_shift_number);
+
+		cv::Mat phase_result, phase_ideal;
 		phase_reconstruct_from_shift(image_for_same_wavelength, phase_result, this->min_B, B_mask);
+		phase_reconstruct_from_shift(ideal_for_same_wavelength, phase_ideal);
 
 		//phase_result += CV_PI;
 
 		phase_results.push_back(phase_result);
+		phase_ideals.push_back(phase_ideal);
 	}
-	
+
 	// multi_wavelength merge
-	merge_multi_wavelength(phase_results, this->strip_generator->wavelengths, out);
+	merge_multi_wavelength(phase_results, phase_ideals, this->strip_generator->wavelengths, out);
 
 	// nomalize
 	out.convertTo(out, CV_64FC1, 1 / CV_2PI);
 
 	// mask
 	out.setTo(0, ~B_mask);
+}
+
+void rectify(const cv::Mat& left, const cv::Mat& right, cv::Mat& left_rectified, cv::Mat& right_rectified, StereoCommon::StereoParameter* stereo_param)
+{
+	cv::Mat Kl = stereo_param->Kl;
+	cv::Mat Dl = stereo_param->Dl;
+	cv::Mat Kr = stereo_param->Kr;
+	cv::Mat Dr = stereo_param->Dr;
+	cv::Mat R = stereo_param->R;
+	cv::Mat T = stereo_param->T;
+
+	cv::Mat R1, R2, P1, P2, Q;
+	cv::Size new_size = left.size();
+	cv::stereoRectify(Kl, Dl, Kr, Dr, left.size(), R, T, R1, R2, P1, P2, Q, cv::CALIB_ZERO_DISPARITY, 1, new_size);
+	stereo_param->Pl = P1;
+	stereo_param->Rl = R1;
+	stereo_param->Pr = P2;
+	stereo_param->Rr = R2;
+	stereo_param->Q = Q;
+
+	cv::Mat left_mapx, left_mapy, right_mapx, right_mapy;
+	cv::initUndistortRectifyMap(Kl, Dl, R1, P1, new_size, CV_32FC1, left_mapx, left_mapy);
+	cv::initUndistortRectifyMap(Kr, Dr, R2, P2, new_size, CV_32FC1, right_mapx, right_mapy);
+
+	cv::remap(left, left_rectified, left_mapx, left_mapy, cv::INTER_LINEAR);
+	cv::remap(right, right_rectified, right_mapx, right_mapy, cv::INTER_LINEAR);
+}
+
+
+double calcualte_ssd(const cv::Mat& left, const cv::Mat& right)
+{
+	cv::Mat diff = left - right;
+	cv::Mat sqr_diff = diff.mul(diff);
+
+	return sqrt(cv::sum(sqr_diff)[0]);
+}
+
+
+ushort stereo_search(const cv::Mat& left, const cv::Mat& right, const cv::Rect& left_block, int min, int max)
+{
+	if (left_block.width != left_block.height)
+	{
+		return 0;
+	}
+
+	const double phase_diff_threshold = 0.01;
+
+	int ksize = left_block.width;
+	int left_x = left_block.x + left_block.width / 2;
+	int left_y = left_block.y + left_block.height / 2;
+	double left_val = left.at<double>(left_y, left_x);
+
+	double ssd_min = DBL_MAX;
+	int ssd_min_idx = 0;
+	for (int d = min; d < max; d++)
+	{
+#if 0
+		if (left_x - d - ksize / 2 >= 0 && abs(left_val - right.at<double>(left_y, left_x - d)) < phase_diff_threshold)
+		{
+			double ssd = calcualte_ssd(left(left_block), right(cv::Rect(left_block.x - d, left_block.y, left_block.width, left_block.height)));
+			if (ssd_min > ssd)
+			{
+				ssd_min = ssd;
+				ssd_min_idx = d;
+			}
+		}
+#else
+		if (left_x - d - ksize / 2 >= 0)
+		{
+			double ssd = abs(left_val - right.at<double>(left_y, left_x - d));
+			if (ssd_min > ssd)
+			{
+				ssd_min = ssd;
+				ssd_min_idx = d;
+			}
+		}
+#endif
+	}
+
+	return ssd_min_idx;
+}
+
+
+void match(const cv::Mat& left, const cv::Mat& right, cv::Mat& disparity, int min_disparity, int max_disparity)
+{
+	int w = left.cols;
+	int h = left.rows;
+
+	const int ksize = 3;
+
+	disparity = cv::Mat::zeros(left.size(), CV_16UC1);
+
+	for (int y = ksize / 2; y < h - ksize / 2; y++)
+	{
+		for (int x = ksize / 2; x < w - ksize / 2; x++)
+		{
+			double left_val = left.at<double>(y, x);
+			if (left_val < DBL_EPSILON)
+			{
+				disparity.at<ushort>(y, x) = 0;
+				continue;
+			}
+
+			cv::Rect block_left = cv::Rect(x - ksize / 2, y - ksize / 2, ksize, ksize);
+			disparity.at<ushort>(y, x) = stereo_search(left, right, block_left, min_disparity, max_disparity);
+		}
+	}
+}
+
+
+void refine(const cv::Mat& left, const cv::Mat& right, const cv::Mat& disparity_ushort, cv::Mat& disparity_float, int min_disparity, int max_disparity)
+{
+	int w = left.cols;
+	int h = left.rows;
+
+	disparity_float = cv::Mat::zeros(disparity_ushort.size(), CV_64FC1);
+
+	for (int y = 0; y < h; y++)
+	{
+		for (int x = 0; x < w; x++)
+		{
+			ushort d = disparity_ushort.at<ushort>(y,x);
+			if (d != 0 && d != min_disparity && d != max_disparity - 1 && (right.at<double>(y, x - d - 1) != 0) && (right.at<double>(y, x - d + 1) != 0))
+			{
+				double c0 = abs(left.at<double>(y, x) - right.at<double>(y, x - d));
+				double c1 = abs(left.at<double>(y, x) - right.at<double>(y, x - (d - 1)));
+				double c2 = abs(left.at<double>(y, x) - right.at<double>(y, x - (d + 1)));
+
+				double demon = c1 + c2 - 2 * c0;
+				double dsub = d + (c1 - c2) / demon / 2.0;
+
+				disparity_float.at<double>(y,x) = dsub;
+
+			}
+			else
+			{
+				disparity_float.at<double>(y, x) = d;
+			}
+		}
+	}
+}
+
+
+void DepthReconstructor::depth_reconstruct(const cv::Mat& left, const cv::Mat& right, cv::Mat& disparity)
+{
+	const int min_disparity = 384;
+	const int max_disparity = 512;
+
+	// rectify
+	cv::Mat left_rectified, right_rectified;
+	rectify(left, right, left_rectified, right_rectified, this->stereo_param);
+
+	// match
+	cv::Mat disparity_ushort;
+	match(left_rectified, right_rectified, disparity_ushort, min_disparity, max_disparity);
+
+	// refine
+	refine(left_rectified, right_rectified, disparity_ushort, disparity, min_disparity, max_disparity);
+	//disparity_ushort.convertTo(disparity, CV_64FC1, 1.0);
 }
