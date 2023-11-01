@@ -144,7 +144,6 @@ void merge_multi_wavelength(const std::vector<cv::Mat>& in, const std::vector<cv
 	phase_diff(phase_diff_result12, phase_diff_result23, wavelength12, wavelength23, out, K);
 	phase_diff_ideal123 = (phase_diff_ideal123 - min) / (max - min + 0.2) * CV_2PI;
 	out = (out - min) / (max - min + 0.2) * CV_2PI;
-	out = out.colRange(0, out.cols - 1) - out.colRange(1, out.cols);
 }
 
 
