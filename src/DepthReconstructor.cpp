@@ -49,8 +49,8 @@ void phase_reconstruct_from_shift(const std::vector<cv::Mat>& in, cv::Mat& out, 
 
 			for (int i = 0; i < in.size(); i++)
 			{
-				sum_sin += (in[i].at<uchar>(y, x) * sin(i * phase_shift));
-				sum_cos += (in[i].at<uchar>(y, x) * cos(i * phase_shift));
+				sum_sin += (double)(in[i].at<double>(y, x) * sin(i * phase_shift));
+				sum_cos += (double)(in[i].at<double>(y, x) * cos(i * phase_shift));
 			}
 
 			if (min_B > 0)
@@ -75,7 +75,7 @@ void phase_reconstruct_from_shift(const std::vector<cv::Mat>& in, cv::Mat& out, 
 }
 
 
-double phase_diff(const cv::Mat& in1, const cv::Mat& in2, double T1, double T2, cv::Mat& out, cv::Mat& K = cv::Mat())
+double phase_diff(const cv::Mat& in1, const cv::Mat& in2, double T1, double T2, cv::Mat& out)
 {
 	int w = in1.cols;
 	int h = in1.rows;
@@ -95,9 +95,6 @@ double phase_diff(const cv::Mat& in1, const cv::Mat& in2, double T1, double T2, 
 			int k = round((t * delta_phi - phi1) / CV_2PI);
 
 			out.at<double>(y, x) = k * CV_2PI + phi1;
-
-			if (!K.empty())
-				K.at<double>(y, x) = 5 * abs(0.5 - abs(abs((t * delta_phi - phi1) / CV_2PI - (int)((t * delta_phi - phi1) / CV_2PI)) - 0.5));
 		}
 	}
 
@@ -115,25 +112,22 @@ void merge_multi_wavelength(const std::vector<cv::Mat>& in, const std::vector<cv
 
 	cv::Mat phase_diff_result12, phase_diff_result23;
 	cv::Mat phase_diff_ideal12, phase_diff_ideal23, phase_diff_ideal123;
-	cv::Mat K12 = cv::Mat::zeros(in[0].size(), CV_64FC1);
-	cv::Mat K23 = cv::Mat::zeros(in[0].size(), CV_64FC1);
-	cv::Mat K = cv::Mat::zeros(in[0].size(), CV_64FC1);
 	double wavelength12, wavelength23, min, max;
 
 	// calcualte phase diff and use ideal min and max to normalize
 	// 12
 	wavelength12 = phase_diff(ideal[0], ideal[1], wavelengths[0], wavelengths[1], phase_diff_ideal12);
 	cv::minMaxLoc(phase_diff_ideal12, &min, &max);
-	
-	wavelength12 = phase_diff(in[0], in[1], wavelengths[0], wavelengths[1], phase_diff_result12, K12);
+
+	wavelength12 = phase_diff(in[0], in[1], wavelengths[0], wavelengths[1], phase_diff_result12);
 	phase_diff_ideal12 = (phase_diff_ideal12 - min) / (max - min + 0.2) * CV_2PI;
 	phase_diff_result12 = (phase_diff_result12 - min) / (max - min + 0.2) * CV_2PI;
 
 	// 23
 	wavelength23 = phase_diff(ideal[1], ideal[2], wavelengths[1], wavelengths[2], phase_diff_ideal23);
 	cv::minMaxLoc(phase_diff_ideal23, &min, &max);
-	
-	wavelength23 = phase_diff(in[1], in[2], wavelengths[1], wavelengths[2], phase_diff_result23, K23);
+
+	wavelength23 = phase_diff(in[1], in[2], wavelengths[1], wavelengths[2], phase_diff_result23);
 	phase_diff_ideal23 = (phase_diff_ideal23 - min) / (max - min + 0.2) * CV_2PI;
 	phase_diff_result23 = (phase_diff_result23 - min) / (max - min + 0.2) * CV_2PI;
 
@@ -141,9 +135,9 @@ void merge_multi_wavelength(const std::vector<cv::Mat>& in, const std::vector<cv
 	phase_diff(phase_diff_ideal12, phase_diff_ideal23, wavelength12, wavelength23, phase_diff_ideal123);
 	cv::minMaxLoc(phase_diff_ideal123, &min, &max);
 
-	phase_diff(phase_diff_result12, phase_diff_result23, wavelength12, wavelength23, out, K);
+	phase_diff(phase_diff_result12, phase_diff_result23, wavelength12, wavelength23, out);
 	phase_diff_ideal123 = (phase_diff_ideal123 - min) / (max - min + 0.2) * CV_2PI;
-	out = (out - min) / (max - min + 0.2) * CV_2PI;
+	out = (out - min) / (max - min + 0.02) * CV_2PI;
 }
 
 
@@ -163,6 +157,8 @@ void DepthReconstructor::phase_reconstruct(const std::vector<cv::Mat>& in, cv::M
 	{
 		cv::Mat pattern;
 		this->strip_generator->next(pattern);
+
+		pattern.convertTo(pattern, CV_64FC1, 1.0);
 		strip_ideals.push_back(pattern);
 	}
 
@@ -315,23 +311,96 @@ void refine(const cv::Mat& left, const cv::Mat& right, const cv::Mat& disparity_
 	{
 		for (int x = 0; x < w; x++)
 		{
-			ushort d = disparity_ushort.at<ushort>(y,x);
+			ushort d = disparity_ushort.at<ushort>(y, x);
+#if 0
+			// use 3 points to fit quafric curve
 			if (d != 0 && d != min_disparity && d != max_disparity - 1 && (right.at<double>(y, x - d - 1) != 0) && (right.at<double>(y, x - d + 1) != 0))
 			{
 				double c0 = abs(left.at<double>(y, x) - right.at<double>(y, x - d));
 				double c1 = abs(left.at<double>(y, x) - right.at<double>(y, x - (d - 1)));
 				double c2 = abs(left.at<double>(y, x) - right.at<double>(y, x - (d + 1)));
 
-				double demon = c1 + c2 - 2 * c0;
-				double dsub = d + (c1 - c2) / demon / 2.0;
+				if (c1 >= c0 && c2 >= c0)
+				{
+					double demon = c1 + c2 - 2 * c0;
+					double dsub = d + (c1 - c2) / demon / 2.0;
 
-				disparity_float.at<double>(y,x) = dsub;
-
+					disparity_float.at<double>(y, x) = dsub;
+				}
+				else
+				{
+					disparity_float.at<double>(y, x) = 0;
+				}
 			}
 			else
 			{
-				disparity_float.at<double>(y, x) = d;
+				disparity_float.at<double>(y, x) = 0;
 			}
+#else
+			// use 5 points to fit linear curve
+			if (d != 0 &&
+				d > min_disparity + 1 &&
+				d < max_disparity - 2 &&
+				right.at<double>(y, x - d - 1) != 0 &&
+				right.at<double>(y, x - d - 2) != 0 &&
+				right.at<double>(y, x - d + 1) != 0 &&
+				right.at<double>(y, x - d + 2) != 0)
+			{
+#if 1
+				cv::Mat A(5, 2, CV_64FC1);
+				cv::Mat B(5, 1, CV_64FC1);
+				for (int i = -2; i <= 2; i++)
+				{
+					A.at<double>(i + 2, 0) = i;
+					A.at<double>(i + 2, 1) = 1;
+
+					B.at<double>(i + 2, 0) = (left.at<double>(y, x) - right.at<double>(y, x - (d + i)));
+				}
+
+				cv::Mat At = A.t();
+				cv::Mat X = (At * A).inv() * (At * B);
+
+				double a = X.at<double>(0);
+				double b = X.at<double>(1);
+
+				double dsub = d - b / a;
+#else
+				cv::Mat A(5, 4, CV_64FC1);
+				cv::Mat B(5, 1, CV_64FC1);
+				for (int i = -2; i <= 2; i++)
+				{
+					A.at<double>(i + 2, 0) = i * i * i;
+					A.at<double>(i + 2, 1) = i * i;
+					A.at<double>(i + 2, 2) = i;
+					A.at<double>(i + 2, 3) = 1;
+
+					B.at<double>(i + 2, 0) = (left.at<double>(y, x) - right.at<double>(y, x - (d + i)));
+				}
+
+				cv::Mat At = A.t();
+				cv::Mat X = (At * A).inv() * (At * B);
+
+				double a = X.at<double>(0);
+				double b = X.at<double>(1);
+				double c = X.at<double>(2);
+				double d = X.at<double>(3);
+
+				double dsub = d - b / a;
+#endif
+				if (abs(dsub - d) < 1)
+				{
+					disparity_float.at<double>(y, x) = dsub;
+				}
+				else
+				{
+					disparity_float.at<double>(y, x) = d;
+				}
+			}
+			else
+			{
+				disparity_float.at<double>(y, x) = 0;
+			}
+#endif
 		}
 	}
 }

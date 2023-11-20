@@ -280,6 +280,9 @@ void test_stereo_multi_wavelength_heterodyne_from_file(const Args& args)
 
         if (!image_left.empty() && !image_right.empty())
         {
+            image_left.convertTo(image_left, CV_64FC1, 1.0);
+            image_right.convertTo(image_right, CV_64FC1, 1.0);
+
             images_left.push_back(image_left);
             images_right.push_back(image_right);
         }

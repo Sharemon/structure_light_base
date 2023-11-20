@@ -94,7 +94,7 @@ inline void generate_pattern(cv::Mat& pattern, int w, int h, int wavelength, dou
 
 	for (int x = 0; x < w; x++)
 	{
-		uchar I = A + B * cos(CV_2PI * x / wavelength + phase_shift);
+		uchar I = round(A + B * cos(CV_2PI * (x + 1) / wavelength + phase_shift));
 		pattern.col(x) = I;
 	}
 }
