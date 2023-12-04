@@ -5,7 +5,7 @@
  @date: 2023-10-24
  */
 
-#include "DepthReconstrcutor.hpp"
+#include "DepthReconstructor.hpp"
 
 using namespace StructureLightBase;
 
@@ -31,7 +31,7 @@ void DepthReconstructor::set_stereo_param(StereoCommon::StereoParameter* paramet
 }
 
 
-void phase_reconstruct_from_shift(const std::vector<cv::Mat>& in, cv::Mat& out, int min_B = -1, cv::Mat& B_mask = cv::Mat())
+void phase_reconstruct_from_shift(const std::vector<cv::Mat>& in, cv::Mat& out, cv::Mat& B_mask,  int min_B = -1)
 {
 	int w = in[0].cols;
 	int h = in[0].rows;
@@ -173,8 +173,8 @@ void DepthReconstructor::phase_reconstruct(const std::vector<cv::Mat>& in, cv::M
 		std::vector<cv::Mat> ideal_for_same_wavelength(strip_ideals.begin() + i * this->strip_generator->phase_shift_number, strip_ideals.begin() + (i + 1) * this->strip_generator->phase_shift_number);
 
 		cv::Mat phase_result, phase_ideal;
-		phase_reconstruct_from_shift(image_for_same_wavelength, phase_result, this->min_B, B_mask);
-		phase_reconstruct_from_shift(ideal_for_same_wavelength, phase_ideal);
+		phase_reconstruct_from_shift(image_for_same_wavelength, phase_result, B_mask, this->min_B);
+		phase_reconstruct_from_shift(ideal_for_same_wavelength, phase_ideal, B_mask);
 
 		//phase_result += CV_PI;
 

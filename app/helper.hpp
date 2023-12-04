@@ -11,7 +11,11 @@
 #include <fstream>
 #include <opencv2/opencv.hpp>
 #include "../src/StripeGenerator.hpp"
-#include "getopt.h"
+#ifdef __linux__
+    #include <getopt.h>
+#elif defined(_WIN32)
+    #include "./getopt.h"
+#endif
 
 class Camera
 {

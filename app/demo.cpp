@@ -9,7 +9,7 @@
 #include <chrono>
 
 #include "helper.hpp"
-#include "../src/DepthReconstrcutor.hpp"
+#include "../src/DepthReconstructor.hpp"
 #include "../src/StripeGenerator.hpp"
 #include "../src/StereoParameter.hpp"
 
