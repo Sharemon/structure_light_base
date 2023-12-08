@@ -13,8 +13,6 @@
 #define NUM_OF_WAVELENGTH (3)
 #define NUM_OF_PHASE_SHIFT (12)
 
-typedef double float_custom_t;
-
 namespace StructureLightBase
 {
     class DepthReconstructor

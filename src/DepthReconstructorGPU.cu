@@ -6,11 +6,11 @@
  */
 
 #include "DepthReconstructorGPU.hpp"
+#include <cuda_runtime.h>
 
-//#define USE_GPU
-#ifdef USE_GPU
-	#include <cuda_runtime.h>
-#endif
+#define USE_GPU
+#define GPU_BLOCK_SIZE (128)
+
 /// @brief cuda api返回检查
 #define CUDA_CHECK(call)                                                     \
     {                                                                        \
@@ -39,18 +39,22 @@ DepthReconstructorGPU::DepthReconstructorGPU(StripeGenerator* strip_generator, c
 
 	// Initialize memory
 #ifdef USE_GPU
-	CUDA_CHECK(cudaMallocManaged((float_custom_t **)&this->image_in, NUM_OF_PHASE_SHIFT * this->image_data_size * sizeof(uchar)));
+	CUDA_CHECK(cudaMalloc((void **)&this->image_in, NUM_OF_PHASE_SHIFT * this->image_data_size * sizeof(float_custom_t)));
 
-	CUDA_CHECK(cudaMallocManaged((float_custom_t **)&this->phase_result_foreach_wavelength, NUM_OF_WAVELENGTH * this->image_data_size * sizeof(float_custom_t)));
-	CUDA_CHECK(cudaMallocManaged((float_custom_t **)&this->phase_diff_result, NUM_OF_WAVELENGTH * this->image_data_size * sizeof(float_custom_t)));
+	CUDA_CHECK(cudaMalloc((void **)&this->phase_result_foreach_wavelength, NUM_OF_WAVELENGTH * this->image_data_size * sizeof(float_custom_t)));
+	CUDA_CHECK(cudaMalloc((void **)&this->phase_diff_result, NUM_OF_WAVELENGTH * this->image_data_size * sizeof(float_custom_t)));
 
-	CUDA_CHECK(cudaMallocManaged((float_custom_t**)&this->phase_result, this->image_data_size * sizeof(float_custom_t)));
-	CUDA_CHECK(cudaMallocManaged((float_custom_t**)&this->B_mask, this->image_data_size * sizeof(uchar)));
+	this->phase_diff_result_host = (float_custom_t *)malloc(NUM_OF_WAVELENGTH * this->image_data_size * sizeof(float_custom_t));
+
+	CUDA_CHECK(cudaMalloc((void**)&this->phase_result, this->image_data_size * sizeof(float_custom_t)));
+	CUDA_CHECK(cudaMalloc((void**)&this->B_mask, this->image_data_size * sizeof(uchar)));
 #else
 	this->image_in = (float_custom_t*)malloc(NUM_OF_PHASE_SHIFT * this->image_data_size * sizeof(float_custom_t));
 
 	this->phase_result_foreach_wavelength = (float_custom_t *)malloc(NUM_OF_WAVELENGTH * this->image_data_size * sizeof(float_custom_t));
 	this->phase_diff_result = (float_custom_t *)malloc(NUM_OF_WAVELENGTH * this->image_data_size * sizeof(float_custom_t));
+
+	this->phase_diff_result_host = (float_custom_t *)malloc(NUM_OF_WAVELENGTH * this->image_data_size * sizeof(float_custom_t));
 
 	this->phase_result = (float_custom_t *)malloc(this->image_data_size * sizeof(float_custom_t));
 	this->B_mask = (uchar *)malloc(this->image_data_size * sizeof(uchar));
@@ -79,6 +83,8 @@ DepthReconstructorGPU::~DepthReconstructorGPU()
 
 	cudaFree(this->phase_result_foreach_wavelength);
 	cudaFree(this->phase_diff_result);
+
+	free(this->phase_diff_result_host);
 	
 	cudaFree(this->phase_result);
 	cudaFree(this->B_mask);
@@ -87,6 +93,8 @@ DepthReconstructorGPU::~DepthReconstructorGPU()
 
 	free(this->phase_result_foreach_wavelength);
 	free(this->phase_diff_result);
+
+	free(this->phase_diff_result_host);
 	
 	free(this->phase_result);
 	free(this->B_mask);
@@ -105,9 +113,38 @@ void DepthReconstructorGPU::set_stereo_param(StereoCommon::StereoParameter* para
 	this->stereo_param = parameter;
 }
 
+__global__ void phase_reconstruct_from_shift_gpu(const float_custom_t *in, float_custom_t *phase_result, uchar *B_mask, int size, int min_B)
+{
+	int i = threadIdx.x + blockIdx.x * blockDim.x;
+	float_custom_t phase_shift = (float_custom_t)CV_2PI / NUM_OF_PHASE_SHIFT;
+
+	float_custom_t sum_sin = 0;
+	float_custom_t sum_cos = 0;
+
+	for (int j = 0; j < NUM_OF_PHASE_SHIFT; j++)
+	{
+		sum_sin += (float_custom_t)(in[j * size + i] * sin(j * phase_shift));
+		sum_cos += (float_custom_t)(in[j * size + i] * cos(j * phase_shift));
+	}
+
+	float_custom_t B = sqrt(sum_sin * sum_sin + sum_cos * sum_cos) * 2 / NUM_OF_PHASE_SHIFT;
+	if (B > min_B)
+	{
+		phase_result[i] = -atan2(sum_sin, sum_cos);
+	}
+	else
+	{
+		phase_result[i] = -CV_PI;
+		B_mask[i] = 0;
+	}
+}		
+
+
 void phase_reconstruct_from_shift(const float_custom_t *in, float_custom_t *phase_result, uchar *B_mask, int size, int min_B)
 {
 #ifdef USE_GPU
+	phase_reconstruct_from_shift_gpu<<<size / GPU_BLOCK_SIZE, GPU_BLOCK_SIZE>>>(in, phase_result, B_mask, size, min_B);
+	cudaDeviceSynchronize();
 #else
 	float_custom_t phase_shift = (float_custom_t)CV_2PI / NUM_OF_PHASE_SHIFT;
 
@@ -126,7 +163,6 @@ void phase_reconstruct_from_shift(const float_custom_t *in, float_custom_t *phas
 		if (B > min_B)
 		{
 			phase_result[i] = -atan2(sum_sin, sum_cos);
-			B_mask[i] = 255;
 		}
 		else
 		{
@@ -137,9 +173,26 @@ void phase_reconstruct_from_shift(const float_custom_t *in, float_custom_t *phas
 #endif
 }
 
+__global__ void phase_diff_gpu(const float_custom_t *in1, const float_custom_t *in2, float_custom_t *out, float_custom_t T1, float_custom_t T2)
+{
+	int i = threadIdx.x + blockIdx.x * blockDim.x;
+	float_custom_t t = T2 / (T2 - T1);
+
+	float_custom_t phi1 = in1[i];
+	float_custom_t phi2 = in2[i];
+
+	float_custom_t delta_phi = phi1 > phi2 ? phi1 - phi2 : (float_custom_t)CV_2PI - (phi2 - phi1);
+	int k = (int)round((t * delta_phi - phi1) / (float_custom_t)CV_2PI);
+
+	out[i] = k * CV_2PI + phi1;
+}
+
+
 void phase_diff(const float_custom_t *in1, const float_custom_t *in2, float_custom_t *out, int size, float_custom_t T1, float_custom_t T2)
 {
 #ifdef USE_GPU
+	phase_diff_gpu<<<size / GPU_BLOCK_SIZE, GPU_BLOCK_SIZE>>>(in1, in2, out, T1, T2);
+	cudaDeviceSynchronize();
 #else
 	float_custom_t t = T2 / (T2 - T1);
 
@@ -173,24 +226,48 @@ void find_max_and_min(const float_custom_t *data, float_custom_t *max, float_cus
 	*min = min_local;
 }
 
+__global__ void phase_normalize_gpu(float_custom_t *data, float_custom_t max, float_custom_t min, float_custom_t scale)
+{
+	int i = threadIdx.x + blockIdx.x * blockDim.x;
+	float_custom_t range_inv = 1.0 / (max - min + 0.2); 	// add 0.2 to avoid max == min
+
+	data[i] = (data[i] - min) * range_inv * scale;
+}
+
 
 void phase_normalize(float_custom_t *data, float_custom_t max, float_custom_t min, int size, float_custom_t scale = 1)
 {
+#ifdef USE_GPU
+	phase_normalize_gpu<<<size / GPU_BLOCK_SIZE, GPU_BLOCK_SIZE>>>(data, max, min, scale);
+	cudaDeviceSynchronize();
+#else
 	float_custom_t range_inv = 1.0 / (max - min + 0.2); 	// add 0.2 to avoid max == min
 
 	for (int i = 0; i < size; i++)
 	{
 		data[i] = (data[i] - min) * range_inv * scale;
 	}
+#endif
+}
+
+__global__ void B_filter_gpu(float_custom_t *in, uchar *mask, float_custom_t *out)
+{
+	int i = threadIdx.x + blockIdx.x * blockDim.x;
+	out[i] = mask[i] == 0 ? 0 : in[i];
 }
 
 
 void B_filter(float_custom_t *in, uchar *mask, float_custom_t *out, int size)
 {
+#ifdef USE_GPU
+	B_filter_gpu<<<size / GPU_BLOCK_SIZE, GPU_BLOCK_SIZE>>>(in, mask, out);
+	cudaDeviceSynchronize();
+#else
 	for (int i = 0; i < size; i++)
 	{
 		out[i] = mask[i] == 0 ? 0 : in[i];
 	}
+#endif
 }
 
 
@@ -208,17 +285,21 @@ void DepthReconstructorGPU::calculate_ideal_phase_max_and_min()
 		pattern.convertTo(pattern, CV_FLOAT_CUSTOM, 1.0);
 		strip_ideals.push_back(pattern);
 	}
-
+	
 	// phase shift reconstruct
 	for (int i = 0; i < NUM_OF_WAVELENGTH; i++)
 	{
 		for (int j = 0; j < NUM_OF_PHASE_SHIFT; j++)
 		{
+#ifdef USE_GPU
+			cudaMemcpy((void*)(this->image_in + j * this->image_data_size), (void*)strip_ideals[i * NUM_OF_PHASE_SHIFT + j].data, this->image_data_size * sizeof(float_custom_t), cudaMemcpyHostToDevice);
+#else
 			memcpy((void*)(this->image_in + j * this->image_data_size), (void*)strip_ideals[i * NUM_OF_PHASE_SHIFT + j].data, this->image_data_size * sizeof(float_custom_t));
+#endif
 		}
 
 		phase_reconstruct_from_shift(	this->image_in, this->phase_result_foreach_wavelength + i * this->image_data_size, 
-										this->B_mask, this->image_data_size, this->min_B);
+										this->B_mask, this->image_data_size, -1);
 	}
 
 	// phase diff
@@ -227,7 +308,13 @@ void DepthReconstructorGPU::calculate_ideal_phase_max_and_min()
 				this->phase_diff_result, 
 				this->image_data_size, this->T1, this->T2);
 
-	find_max_and_min(this->phase_diff_result, &this->max_T12, &this->min_T12, this->image_data_size);
+#ifdef USE_GPU
+	cudaMemcpy((void *)this->phase_diff_result_host, (void *)this->phase_diff_result, this->image_data_size * sizeof(float_custom_t), cudaMemcpyDeviceToHost);
+#else
+	memcpy((void *)this->phase_diff_result_host, (void *)this->phase_diff_result, this->image_data_size * sizeof(float_custom_t));
+#endif
+	find_max_and_min(this->phase_diff_result_host, &this->max_T12, &this->min_T12, this->image_data_size);
+
 	phase_normalize(this->phase_diff_result, this->max_T12, this->min_T12, this->image_data_size, CV_2PI);
 
 	phase_diff(	this->phase_result_foreach_wavelength + 1 * this->image_data_size,
@@ -235,7 +322,13 @@ void DepthReconstructorGPU::calculate_ideal_phase_max_and_min()
 				this->phase_diff_result + this->image_data_size, 
 				this->image_data_size, this->T2, this->T3);
 
-	find_max_and_min(this->phase_diff_result + this->image_data_size, &this->max_T23, &this->min_T23, this->image_data_size);
+#ifdef USE_GPU
+	cudaMemcpy((void *)(this->phase_diff_result_host + this->image_data_size), (void *)(this->phase_diff_result + this->image_data_size), this->image_data_size * sizeof(float_custom_t), cudaMemcpyDeviceToHost);
+#else
+	memcpy((void *)(this->phase_diff_result_host + this->image_data_size), (void *)(this->phase_diff_result + this->image_data_size), this->image_data_size * sizeof(float_custom_t));
+#endif
+	find_max_and_min(this->phase_diff_result_host + this->image_data_size, &this->max_T23, &this->min_T23, this->image_data_size);
+
 	phase_normalize(this->phase_diff_result + this->image_data_size, this->max_T23, this->min_T23, this->image_data_size, CV_2PI);
 
 	phase_diff( this->phase_diff_result, 
@@ -243,7 +336,15 @@ void DepthReconstructorGPU::calculate_ideal_phase_max_and_min()
 				this->phase_diff_result + this->image_data_size * 2,
 				this->image_data_size, this->T12, this->T23);
 
-	find_max_and_min(this->phase_diff_result + this->image_data_size * 2, &this->max_T123, &this->min_T123, this->image_data_size);
+#ifdef USE_GPU
+	cudaMemcpy((void *)(this->phase_diff_result_host + this->image_data_size * 2), (void *)(this->phase_diff_result + this->image_data_size * 2), this->image_data_size * sizeof(float_custom_t), cudaMemcpyDeviceToHost);
+#else
+	memcpy((void *)(this->phase_diff_result_host + this->image_data_size * 2), (void *)(this->phase_diff_result + this->image_data_size * 2), this->image_data_size * sizeof(float_custom_t));
+#endif
+	find_max_and_min(this->phase_diff_result_host + this->image_data_size * 2, &this->max_T123, &this->min_T123, this->image_data_size);
+
+	std::cout << "max: " << this->max_T12 << ", " << this->max_T23 << ", " << this->max_T123 << std::endl;
+	std::cout << "min: " << this->min_T12 << ", " << this->min_T23 << ", " << this->min_T123 << std::endl;	
 }
 
 
@@ -255,18 +356,31 @@ void DepthReconstructorGPU::phase_reconstruct(const std::vector<cv::Mat>& in, cv
 		return;
 	}
 
+#ifdef USE_GPU
+	cudaMemset(this->B_mask, 255, this->image_data_size * sizeof(uchar));
+#else
+	memset(this->B_mask, 255, this->image_data_size * sizeof(uchar));
+#endif
+
 	// phase shift reconstruct
 	for (int i = 0; i < NUM_OF_WAVELENGTH; i++)
 	{
+		auto t0 = std::chrono::high_resolution_clock::now();
 		for (int j = 0; j < NUM_OF_PHASE_SHIFT; j++)
 		{
+#ifdef USE_GPU
+			cudaMemcpy((void*)(this->image_in + j * this->image_data_size), (void*)in[i * NUM_OF_PHASE_SHIFT + j].data, this->image_data_size * sizeof(float_custom_t), cudaMemcpyHostToDevice);
+#else
 			memcpy((void*)(this->image_in + j * this->image_data_size), (void*)in[i * NUM_OF_PHASE_SHIFT + j].data, this->image_data_size * sizeof(float_custom_t));
+#endif
 		}
+		auto t1 = std::chrono::high_resolution_clock::now();
+		std::cout << "\ttime used for cudaMemcpy in: " << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << "ms" << std::endl;
 
-		auto t0 = std::chrono::high_resolution_clock::now();
+		t0 = std::chrono::high_resolution_clock::now();
 		phase_reconstruct_from_shift(this->image_in, this->phase_result_foreach_wavelength + i * this->image_data_size,
 									 this->B_mask, this->image_data_size, this->min_B);
-		auto t1 = std::chrono::high_resolution_clock::now();
+		t1 = std::chrono::high_resolution_clock::now();
 		std::cout << "\ttime used for phase_reconstruct_from_shift: " << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << "ms" << std::endl;
 	}
 
@@ -317,8 +431,15 @@ void DepthReconstructorGPU::phase_reconstruct(const std::vector<cv::Mat>& in, cv
 	std::cout << "\ttime used for B_filter: " << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << "ms" << std::endl;
 
 	// copy result to out
+	t0 = std::chrono::high_resolution_clock::now();
 	out = cv::Mat::zeros(this->image_size, CV_FLOAT_CUSTOM);
+#ifdef USE_GPU
+	cudaMemcpy(out.data, this->phase_result, this->image_data_size * sizeof(float_custom_t), cudaMemcpyDeviceToHost);
+#else
 	memcpy(out.data, this->phase_result, this->image_data_size * sizeof(float_custom_t));
+#endif
+	t1 = std::chrono::high_resolution_clock::now();
+	std::cout << "\ttime used for cudaMemcpy out: " << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << "ms" << std::endl;
 }
 
 
