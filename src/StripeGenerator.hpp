@@ -47,6 +47,7 @@ namespace StructureLightBase
         int get_pattern_size();
 
         friend class DepthReconstructor;
+        friend class DepthReconstructorGPU;
     };
     
 }

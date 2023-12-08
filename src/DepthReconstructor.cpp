@@ -53,22 +53,15 @@ void phase_reconstruct_from_shift(const std::vector<cv::Mat>& in, cv::Mat& out, 
 				sum_cos += (double)(in[i].at<double>(y, x) * cos(i * phase_shift));
 			}
 
-			if (min_B > 0)
+			double B = sqrt(sum_sin * sum_sin + sum_cos * sum_cos) * 2 / in.size();
+			if (B > min_B)
 			{
-				double B = sqrt(sum_sin * sum_sin + sum_cos * sum_cos) * 2 / in.size();
-				if (B > min_B)
-				{
-					out.at<double>(y, x) = -atan2(sum_sin, sum_cos);
-				}
-				else
-				{
-					out.at<double>(y, x) = -CV_PI;
-					B_mask.at<uchar>(y, x) = 0;
-				}
+				out.at<double>(y, x) = -atan2(sum_sin, sum_cos);
 			}
 			else
 			{
-				out.at<double>(y, x) = -atan2(sum_sin, sum_cos);
+				out.at<double>(y, x) = -CV_PI;
+				B_mask.at<uchar>(y, x) = 0;
 			}
 		}
 	}
@@ -167,6 +160,7 @@ void DepthReconstructor::phase_reconstruct(const std::vector<cv::Mat>& in, cv::M
 	cv::Mat B_mask = cv::Mat(in[0].size(), CV_8UC1, 255);
 
 	// phase shift reconstruct
+	auto t0 = std::chrono::high_resolution_clock::now();
 	for (int i = 0; i < this->strip_generator->wavelengths.size(); i++)
 	{
 		std::vector<cv::Mat> image_for_same_wavelength(in.begin() + i * this->strip_generator->phase_shift_number, in.begin() + (i + 1) * this->strip_generator->phase_shift_number);
@@ -181,9 +175,14 @@ void DepthReconstructor::phase_reconstruct(const std::vector<cv::Mat>& in, cv::M
 		phase_results.push_back(phase_result);
 		phase_ideals.push_back(phase_ideal);
 	}
+	auto t1 = std::chrono::high_resolution_clock::now();
+	std::cout << "\ttime used for phase calc 1: " << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << "ms" << std::endl;
 
 	// multi_wavelength merge
+	t0 = std::chrono::high_resolution_clock::now();
 	merge_multi_wavelength(phase_results, phase_ideals, this->strip_generator->wavelengths, out);
+	t1 = std::chrono::high_resolution_clock::now();
+	std::cout << "\ttime used for phase calc 2: " << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << "ms" << std::endl;
 
 	// nomalize
 	out.convertTo(out, CV_64FC1, 1 / CV_2PI);
@@ -346,7 +345,7 @@ void refine(const cv::Mat& left, const cv::Mat& right, const cv::Mat& disparity_
 				right.at<double>(y, x - d + 1) != 0 &&
 				right.at<double>(y, x - d + 2) != 0)
 			{
-#if 1
+#if 0
 				cv::Mat A(5, 2, CV_64FC1);
 				cv::Mat B(5, 1, CV_64FC1);
 				for (int i = -2; i <= 2; i++)
@@ -365,25 +364,12 @@ void refine(const cv::Mat& left, const cv::Mat& right, const cv::Mat& disparity_
 
 				double dsub = d - b / a;
 #else
-				cv::Mat A(5, 4, CV_64FC1);
-				cv::Mat B(5, 1, CV_64FC1);
-				for (int i = -2; i <= 2; i++)
-				{
-					A.at<double>(i + 2, 0) = i * i * i;
-					A.at<double>(i + 2, 1) = i * i;
-					A.at<double>(i + 2, 2) = i;
-					A.at<double>(i + 2, 3) = 1;
+				double c0 = (left.at<double>(y, x) - right.at<double>(y, x - d));
+				double c1 = (left.at<double>(y, x) - right.at<double>(y, x - (d - 1)));
+				double c2 = (left.at<double>(y, x) - right.at<double>(y, x - (d + 1)));
 
-					B.at<double>(i + 2, 0) = (left.at<double>(y, x) - right.at<double>(y, x - (d + i)));
-				}
-
-				cv::Mat At = A.t();
-				cv::Mat X = (At * A).inv() * (At * B);
-
-				double a = X.at<double>(0);
-				double b = X.at<double>(1);
-				double c = X.at<double>(2);
-				double d = X.at<double>(3);
+				double a = (c2 - c1) / 2;
+				double b = c0;
 
 				double dsub = d - b / a;
 #endif
@@ -413,13 +399,22 @@ void DepthReconstructor::depth_reconstruct(const cv::Mat& left, const cv::Mat& r
 
 	// rectify
 	cv::Mat left_rectified, right_rectified;
+	auto t0 = std::chrono::high_resolution_clock::now();
 	rectify(left, right, left_rectified, right_rectified, this->stereo_param);
+	auto t1 = std::chrono::high_resolution_clock::now();
+	std::cout << "\ttime used for rectify: " << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << "ms" << std::endl;
 
 	// match
 	cv::Mat disparity_ushort;
+	t0 = std::chrono::high_resolution_clock::now();
 	match(left_rectified, right_rectified, disparity_ushort, min_disparity, max_disparity);
+	t1 = std::chrono::high_resolution_clock::now();
+	std::cout << "\ttime used for match: " << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << "ms" << std::endl;
 
 	// refine
+	t0 = std::chrono::high_resolution_clock::now();
 	refine(left_rectified, right_rectified, disparity_ushort, disparity, min_disparity, max_disparity);
+	t1 = std::chrono::high_resolution_clock::now();
+	std::cout << "\ttime used for refine: " << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << "ms" << std::endl;
 	//disparity_ushort.convertTo(disparity, CV_64FC1, 1.0);
 }

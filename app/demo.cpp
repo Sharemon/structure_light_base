@@ -6,10 +6,10 @@
  */
 
 #include <thread>
-#include <chrono>
 
 #include "helper.hpp"
 #include "../src/DepthReconstructor.hpp"
+#include "../src/DepthReconstructorGPU.hpp"
 #include "../src/StripeGenerator.hpp"
 #include "../src/StereoParameter.hpp"
 
@@ -295,14 +295,20 @@ void test_stereo_multi_wavelength_heterodyne_from_file(const Args& args)
     depth_reconstructor->set_min_B(10);
 
     cv::Mat phase_image_left;
+    auto t0 = std::chrono::high_resolution_clock::now();
     depth_reconstructor->phase_reconstruct(images_left, phase_image_left);
+    auto t1 = std::chrono::high_resolution_clock::now();
+    std::cout << "time used for phase calc: " << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << "ms" << std::endl;
 
     cv::Mat phase_image_left_filtered;
     //noise_filter<double>(phase_image_left, phase_image_left_filtered);
     phase_image_left_filtered = phase_image_left;
 
     cv::Mat phase_image_right;
+    t0 = std::chrono::high_resolution_clock::now();
     depth_reconstructor->phase_reconstruct(images_right, phase_image_right);
+    t1 = std::chrono::high_resolution_clock::now();
+    std::cout << "time used for phase calc: " << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << "ms" << std::endl;
 
     cv::Mat phase_image_right_filtered;
     //noise_filter<double>(phase_image_right, phase_image_right_filtered);
@@ -311,7 +317,11 @@ void test_stereo_multi_wavelength_heterodyne_from_file(const Args& args)
     // depth reconstruct
     cv::Mat disparity;
     depth_reconstructor->set_stereo_param(stereo_param);
+
+    t0 = std::chrono::high_resolution_clock::now();
     depth_reconstructor->depth_reconstruct(phase_image_left_filtered, phase_image_right_filtered, disparity);
+    t1 = std::chrono::high_resolution_clock::now();
+    std::cout << "time used for stereo match: " << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << "ms" << std::endl;
 
     cv::Mat disparity_filtered;
     //noise_filter<double>(disparity, disparity_filtered, 5);
@@ -345,6 +355,111 @@ void test_stereo_multi_wavelength_heterodyne_from_file(const Args& args)
 }
 
 
+void test_stereo_multi_wavelength_heterodyne_from_file_gpu(const Args& args)
+{
+    // initialize
+    std::vector<int> wavelengths = { 28, 26, 24 };
+    StripeGenerator* stripe_generator = new StripeGenerator(1280, 1024);
+    stripe_generator->set_type(MULTI_WAVELENGTH_HETERODYNE);     // GRAY_CODE
+    stripe_generator->set_waveLengths(wavelengths);
+    stripe_generator->set_phase_shift_number(12);
+    stripe_generator->set_A(130);
+    stripe_generator->set_B(90);
+
+    // project stripe and capture image
+    std::vector<cv::Mat> images_left;
+    std::vector<cv::Mat> images_right;
+
+    for (int i = 0; i < stripe_generator->get_pattern_size(); i++)
+    {
+        std::string filepath_left = "../data/4/L/" + std::to_string(i + 1) + ".bmp";
+        cv::Mat image_left = cv::imread(filepath_left, cv::IMREAD_GRAYSCALE);
+
+        std::string filepath_right = "../data/4/R/" + std::to_string(i + 1) + ".bmp";
+        cv::Mat image_right = cv::imread(filepath_right, cv::IMREAD_GRAYSCALE);
+
+        if (!image_left.empty() && !image_right.empty())
+        {
+            image_left.convertTo(image_left, CV_64FC1, 1.0);
+            image_right.convertTo(image_right, CV_64FC1, 1.0);
+
+            images_left.push_back(image_left);
+            images_right.push_back(image_right);
+        }
+    }
+
+    cv::Size image_size = images_left[0].size();
+    StereoCommon::StereoParameter* stereo_param = new StereoCommon::StereoParameter("../data/4/stereo_params.yaml", image_size);
+
+    // unwrap phase
+    DepthReconstructorGPU* depth_reconstructor_gpu = new DepthReconstructorGPU(stripe_generator, image_size);
+    depth_reconstructor_gpu->set_min_B(10);
+
+    cv::Mat phase_image_left;
+    auto t0 = std::chrono::high_resolution_clock::now();
+    depth_reconstructor_gpu->phase_reconstruct(images_left, phase_image_left);
+    auto t1 = std::chrono::high_resolution_clock::now();
+    std::cout << "time used for phase calc: " << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << "ms" << std::endl;
+
+    cv::Mat phase_image_left_filtered;
+    //noise_filter<double>(phase_image_left, phase_image_left_filtered);
+    phase_image_left_filtered = phase_image_left;
+
+    cv::Mat phase_image_right;
+    t0 = std::chrono::high_resolution_clock::now();
+    depth_reconstructor_gpu->phase_reconstruct(images_right, phase_image_right);
+    t1 = std::chrono::high_resolution_clock::now();
+    std::cout << "time used for phase calc: " << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << "ms" << std::endl;
+
+    cv::Mat phase_image_right_filtered;
+    //noise_filter<double>(phase_image_right, phase_image_right_filtered);
+    phase_image_right_filtered = phase_image_right;
+
+    // depth reconstruct
+    cv::Mat disparity;
+    depth_reconstructor_gpu->set_stereo_param(stereo_param);
+
+    t0 = std::chrono::high_resolution_clock::now();
+    depth_reconstructor_gpu->depth_reconstruct(phase_image_left_filtered, phase_image_right_filtered, disparity);
+    t1 = std::chrono::high_resolution_clock::now();
+    std::cout << "time used for stereo match: " << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << "ms" << std::endl;
+
+    cv::Mat disparity_filtered;
+    //noise_filter<double>(disparity, disparity_filtered, 5);
+    disparity_filtered = disparity;
+
+    if (!disparity_filtered.empty())
+    {
+        // save result
+        save_image_to_txt<double>("./disparity.txt", disparity_filtered);
+        save_image_to_txt<double>("./left.txt", phase_image_left_filtered);
+        save_image_to_txt<double>("./right.txt", phase_image_right_filtered);
+
+        // save point cloud
+        std::vector<cv::Vec6f> point_cloud_with_texture;
+        convert_disparity_map_to_point_cloud<double>(disparity_filtered, point_cloud_with_texture, stereo_param->Q, cv::Mat(images_left[0].size(), CV_8UC1, 255));
+
+        std::ofstream point_cloud_file("./point_cloud.txt");
+        for (auto point : point_cloud_with_texture)
+        {
+            point_cloud_file << point[0] << " " << point[1] << " " << point[2] << " " << point[3] << " " << point[4] << " " << point[5] << std::endl;
+        }
+        point_cloud_file.close();
+
+        // show result
+        cv::Mat disparity_u8;
+        disparity_filtered.convertTo(disparity_u8, CV_8UC1, 0.5);
+
+        cv::imshow("disparity", disparity_u8);
+        cv::waitKey(0);
+    }
+
+    delete depth_reconstructor_gpu;
+    delete stripe_generator;
+    delete stereo_param;
+}
+
+
 int main(int argc, char *argv[])
 {
     Args args;
@@ -353,6 +468,7 @@ int main(int argc, char *argv[])
     //test_multi_wavelength_heterodyne(args);
     //test_multi_wavelength_heterodyne_from_file(args);
     //test_stereo_multi_wavelength_heterodyne(args);
-    test_stereo_multi_wavelength_heterodyne_from_file(args);
+    //test_stereo_multi_wavelength_heterodyne_from_file(args);
+    test_stereo_multi_wavelength_heterodyne_from_file_gpu(args);
     return 0;
 }
