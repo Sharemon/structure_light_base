@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <fstream>
 #include "StripeGenerator.hpp"
 #include "StereoParameter.hpp"
 
@@ -30,6 +31,7 @@ namespace StructureLightBase
         float_custom_t *image_in;                            // 12 * width * height * sizeof(uchar)
         float_custom_t *phase_result_foreach_wavelength;     //  3 * width * height * sizeof(float_custom_t)
         float_custom_t *phase_diff_result;                   //  3 * width * height * sizeof(float_custom_t)
+        float_custom_t *phase_diff_result_host;              //  3 * width * height * sizeof(float_custom_t)
         float_custom_t *phase_result;                        //  1 * width * height * sizeof(float_custom_t)
         uchar *B_mask;                                       //  1 * width * height * sizeof(uchar)
 
