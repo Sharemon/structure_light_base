@@ -5,12 +5,11 @@
  @date: 2023-10-24
  */
 
+#include <fstream>
 #include "DepthReconstructorGPU.hpp"
 
 //#define USE_GPU
-#ifdef USE_GPU
-	#include <cuda_runtime.h>
-#endif
+
 /// @brief cuda api返回检查
 #define CUDA_CHECK(call)                                                     \
     {                                                                        \
@@ -111,7 +110,7 @@ void phase_reconstruct_from_shift(const float_custom_t *in, float_custom_t *phas
 #else
 	float_custom_t phase_shift = (float_custom_t)CV_2PI / NUM_OF_PHASE_SHIFT;
 
-	for (int i = 0; i < size; i++)
+	for (int i = 0; i < 128; i++)
 	{
 		float_custom_t sum_sin = 0;
 		float_custom_t sum_cos = 0;
@@ -126,13 +125,15 @@ void phase_reconstruct_from_shift(const float_custom_t *in, float_custom_t *phas
 		if (B > min_B)
 		{
 			phase_result[i] = -atan2(sum_sin, sum_cos);
-			B_mask[i] = 255;
 		}
 		else
 		{
 			phase_result[i] = -CV_PI;
 			B_mask[i] = 0;
 		}
+
+		//std::cout << "data " << i << ": " << in[i+2] << ", " << phase_shift << ", " << sin(phase_shift) << ", " << phase_result[i] << std::endl;
+
 	}
 #endif
 }
@@ -221,6 +222,18 @@ void DepthReconstructorGPU::calculate_ideal_phase_max_and_min()
 										this->B_mask, this->image_data_size, this->min_B);
 	}
 
+	std::ofstream of1("./phase_result_foreach_wavelength.txt");
+	for (int y = 0; y < 1; y++)
+	{
+		for (int x = 0; x < this->image_size.width; x++)
+		{
+			of1 << this->phase_result_foreach_wavelength[y * this->image_size.width + x] << ",";
+		}
+
+		of1 << std::endl;
+	}
+	of1.close();
+
 	// phase diff
 	phase_diff(	this->phase_result_foreach_wavelength + 0 * this->image_data_size,
 				this->phase_result_foreach_wavelength + 1 * this->image_data_size,
@@ -244,6 +257,9 @@ void DepthReconstructorGPU::calculate_ideal_phase_max_and_min()
 				this->image_data_size, this->T12, this->T23);
 
 	find_max_and_min(this->phase_diff_result + this->image_data_size * 2, &this->max_T123, &this->min_T123, this->image_data_size);
+
+	std::cout << "max: " << this->max_T12 << ", " << this->max_T23 << ", " << this->max_T123 << std::endl;
+	std::cout << "min: " << this->min_T12 << ", " << this->min_T23 << ", " << this->min_T123 << std::endl;
 }
 
 
@@ -254,6 +270,9 @@ void DepthReconstructorGPU::phase_reconstruct(const std::vector<cv::Mat>& in, cv
 		out = cv::Mat();
 		return;
 	}
+
+	memset(this->B_mask, 255, this->image_data_size * sizeof(uchar));
+	cv::Mat BB = cv::Mat(this->image_size, CV_8UC1, this->B_mask);
 
 	// phase shift reconstruct
 	for (int i = 0; i < NUM_OF_WAVELENGTH; i++)
